@@ -3,11 +3,11 @@
 This project builds an English-language Telegram shop bot that:
 
 - lists products from the Canboso buyer API;
-- accepts Binance ID and USDT BEP20 payment flows;
-- automatically checks USDT BEP20 transfers on BNB Smart Chain;
+- accepts Binance ID, USDT BEP20, and USDT TRC20 payment flows;
+- automatically checks USDT BEP20 transfers on BNB Smart Chain and USDT TRC20 transfers on TRON;
 - verifies Binance ID references through Binance Pay history when API credentials are configured;
 - purchases from Canboso after payment is confirmed;
-- stores orders in SQLite to prevent duplicate fulfillment.
+- stores only active payment requests in SQLite and removes finished/expired requests.
 
 ## API Sources
 
@@ -40,6 +40,8 @@ The local `.env` file has already been created. Fill these before accepting real
 - `BINANCE_PAY_HISTORY_API_KEY` and `BINANCE_PAY_HISTORY_API_SECRET`: required for Binance ID reference checks.
 - `USDT_BEP20_RECEIVER_ADDRESS`: the BEP20 wallet address buyers should send USDT to.
 - `BSC_RPC_URL`: use a reliable RPC provider in production. The Binance dataseed RPC often rejects `eth_getLogs`, so the default uses PublicNode with fallback URLs.
+- `USDT_TRC20_RECEIVER_ADDRESS`: the TRC20 wallet address buyers should send USDT to.
+- `TRON_GRID_API_KEY`: optional TronGrid API key. The bot can use the public API, but a key is recommended for production rate limits.
 - `SELLING_MARKUP_PERCENT`: markup added to the Canboso source USD price before showing USDT prices and creating payment amounts. Default is `25`.
 - `ADMIN_USERNAMES`: comma-separated Telegram usernames allowed to broadcast. Default is `shinbutchj`.
 - `ADMIN_USER_IDS`: optional comma-separated Telegram numeric user IDs for stricter admin access.
@@ -61,6 +63,12 @@ USDT BEP20:
 2. A background job scans USDT `Transfer` logs to the receiving address.
 3. After the configured number of confirmations, the bot fulfills the order.
 
+USDT TRC20:
+
+1. The bot shows the TRC20 receiving address and exact amount.
+2. A background job queries TronGrid for confirmed USDT TRC20 transfers to the receiving address.
+3. When the exact unique amount is found, the bot fulfills the order.
+
 ## Important Notes
 
 - Canboso purchases are wallet purchases. Your Canboso buyer key must have enough wallet balance for orders after customer payment is confirmed.
@@ -72,7 +80,6 @@ USDT BEP20:
 
 - `/start`: open the main menu
 - `/products`: browse products
-- `/orders`: view recent orders
-- `/check`: check pending USDT BEP20 orders immediately
+- `/check`: check pending USDT BEP20/TRC20 orders immediately
 - `/help`: show payment help
 - `/broadcast message`: admin only, send a plain-text message to all users who have interacted with the bot

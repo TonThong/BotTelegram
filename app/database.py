@@ -82,6 +82,7 @@ class Database:
             con.close()
 
     def init(self) -> None:
+        removed_orders = 0
         with self.connect() as con:
             con.execute(
                 """
@@ -159,6 +160,21 @@ class Database:
                 """,
                 (now, now),
             )
+            removed_orders += con.execute(
+                """
+                DELETE FROM orders
+                WHERE status IN ('fulfilled', 'expired', 'failed')
+                """
+            ).rowcount
+            removed_orders += con.execute(
+                """
+                DELETE FROM orders
+                WHERE status = 'awaiting_payment' AND expires_at < ?
+                """,
+                (now,),
+            ).rowcount
+        if removed_orders > 0:
+            self.vacuum()
 
     def upsert_user(
         self,
@@ -263,19 +279,6 @@ class Database:
             raise KeyError(f"Order {order_id} not found.")
         return self._row_to_order(row)
 
-    def list_recent_orders(self, telegram_user_id: int, limit: int = 10) -> list[Order]:
-        with self.connect() as con:
-            rows = con.execute(
-                """
-                SELECT * FROM orders
-                WHERE telegram_user_id = ?
-                ORDER BY id DESC
-                LIMIT ?
-                """,
-                (telegram_user_id, limit),
-            ).fetchall()
-        return [self._row_to_order(row) for row in rows]
-
     def pending_orders(self, payment_method: str | None = None) -> list[Order]:
         sql = "SELECT * FROM orders WHERE status = 'awaiting_payment'"
         params: tuple[Any, ...] = ()
@@ -355,6 +358,14 @@ class Database:
                 """,
                 (json.dumps(payload, ensure_ascii=False), order_id),
             )
+
+    def delete_order(self, order_id: int) -> None:
+        with self.connect() as con:
+            con.execute("DELETE FROM orders WHERE id = ?", (order_id,))
+
+    def vacuum(self) -> None:
+        with sqlite3.connect(self.path, isolation_level=None) as con:
+            con.execute("VACUUM")
 
     def _row_to_order(self, row: sqlite3.Row) -> Order:
         response = row["canboso_response"]

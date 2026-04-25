@@ -47,11 +47,17 @@ class Settings:
     binance_pay_history_api_secret: str
     binance_pay_history_base_url: str
     usdt_bep20_receiver_address: str
+    usdt_trc20_receiver_address: str
     bsc_rpc_url: str
     bsc_rpc_fallback_urls: tuple[str, ...]
     bsc_usdt_contract: str
     bsc_confirmations: int
     bsc_log_chunk_size: int
+    tron_grid_base_url: str
+    tron_grid_api_key: str
+    tron_usdt_contract: str
+    tron_page_limit: int
+    tron_scan_safety_window_seconds: int
     selling_markup_percent: Decimal
     payment_expiry_minutes: int
     payment_poll_interval_seconds: int
@@ -71,6 +77,10 @@ class Settings:
     @property
     def usdt_bep20_enabled(self) -> bool:
         return bool(self.usdt_bep20_receiver_address)
+
+    @property
+    def usdt_trc20_enabled(self) -> bool:
+        return bool(self.usdt_trc20_receiver_address)
 
 
 def load_settings() -> Settings:
@@ -103,6 +113,7 @@ def load_settings() -> Settings:
             "BINANCE_PAY_HISTORY_BASE_URL", "https://api.binance.com"
         ).rstrip("/"),
         usdt_bep20_receiver_address=os.getenv("USDT_BEP20_RECEIVER_ADDRESS", "").strip(),
+        usdt_trc20_receiver_address=os.getenv("USDT_TRC20_RECEIVER_ADDRESS", "").strip(),
         bsc_rpc_url=os.getenv("BSC_RPC_URL", "https://bsc-rpc.publicnode.com").strip(),
         bsc_rpc_fallback_urls=_get_csv(
             "BSC_RPC_FALLBACK_URLS",
@@ -113,6 +124,13 @@ def load_settings() -> Settings:
         ).strip(),
         bsc_confirmations=_get_int("BSC_CONFIRMATIONS", 8),
         bsc_log_chunk_size=_get_int("BSC_LOG_CHUNK_SIZE", 200),
+        tron_grid_base_url=os.getenv("TRON_GRID_BASE_URL", "https://api.trongrid.io").strip(),
+        tron_grid_api_key=os.getenv("TRON_GRID_API_KEY", "").strip(),
+        tron_usdt_contract=os.getenv(
+            "TRON_USDT_CONTRACT", "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
+        ).strip(),
+        tron_page_limit=_get_int("TRON_PAGE_LIMIT", 200),
+        tron_scan_safety_window_seconds=_get_int("TRON_SCAN_SAFETY_WINDOW_SECONDS", 180),
         selling_markup_percent=_get_decimal("SELLING_MARKUP_PERCENT", "25"),
         payment_expiry_minutes=_get_int("PAYMENT_EXPIRY_MINUTES", 45),
         payment_poll_interval_seconds=_get_int("PAYMENT_POLL_INTERVAL_SECONDS", 45),

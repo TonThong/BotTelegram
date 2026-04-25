@@ -19,9 +19,10 @@ from app.bsc import BscError, BscUsdtScanner
 from app.canboso_client import CanbosoClient, CanbosoError, Product
 from app.config import Settings, load_settings
 from app.database import Database, Order
-from app.messages import delivery_message, h, order_brief, payment_amount_line, product_summary
+from app.messages import delivery_message, h, payment_amount_line, product_summary
 from app.payment_amounts import amount_with_unique_fraction, base_usdt_amount, product_unit_usdt
 from app.text_utils import format_usdt
+from app.tron import TronError, TronUsdtScanner
 
 
 logging.basicConfig(
@@ -33,6 +34,7 @@ logger = logging.getLogger(__name__)
 STATE_QUANTITY = "quantity"
 STATE_SLOT_EMAIL = "slot_email"
 STATE_BINANCE_REFERENCE = "binance_reference"
+USDT_PAYMENT_METHODS = ("usdt_bep20", "usdt_trc20")
 
 
 def product_is_available(product: Product) -> bool:
@@ -86,7 +88,6 @@ def main_menu(settings: Settings | None = None) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("Browse products", callback_data="products:0")],
-            [InlineKeyboardButton("My orders", callback_data="orders")],
             [InlineKeyboardButton("Help", callback_data="help")],
             [InlineKeyboardButton("Contact admin", url=f"https://t.me/{contact_username}")],
         ]
@@ -118,6 +119,7 @@ async def send_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Payment help\n\n"
         "Binance ID: send the exact USDT amount, then paste the transaction reference here.\n\n"
         "USDT BEP20: send the exact amount to the shown BEP20 address. The bot checks the blockchain automatically.\n\n"
+        "USDT TRC20: send the exact amount to the shown TRC20 address. The bot checks the blockchain automatically.\n\n"
         "Use the exact amount shown for your order. It includes a small unique fraction for matching."
     )
     keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Back to menu", callback_data="menu")]])
@@ -130,11 +132,6 @@ async def send_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def products_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     track_user(update, context)
     await show_products(update, context, page=0)
-
-
-async def orders_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    track_user(update, context)
-    await show_orders(update, context)
 
 
 async def show_products(update: Update, context: ContextTypes.DEFAULT_TYPE, *, page: int) -> None:
@@ -323,6 +320,8 @@ async def choose_payment(
         rows.append([InlineKeyboardButton("Pay with Binance ID", callback_data="pay:binance_id")])
     if settings.usdt_bep20_enabled:
         rows.append([InlineKeyboardButton("Pay with USDT BEP20", callback_data="pay:usdt_bep20")])
+    if settings.usdt_trc20_enabled:
+        rows.append([InlineKeyboardButton("Pay with USDT TRC20", callback_data="pay:usdt_trc20")])
     rows.append([InlineKeyboardButton("Back to products", callback_data="products:0")])
 
     if len(rows) == 1:
@@ -355,6 +354,7 @@ async def create_payment_order(
     db: Database = context.application.bot_data["db"]
     canboso: CanbosoClient = context.application.bot_data["canboso"]
     bsc_scanner: BscUsdtScanner | None = context.application.bot_data.get("bsc_scanner")
+    tron_scanner: TronUsdtScanner | None = context.application.bot_data.get("tron_scanner")
     try:
         current_product = await canboso.get_product(draft["product_id"])
     except CanbosoError as exc:
@@ -387,6 +387,15 @@ async def create_payment_order(
             start_block = max(0, await bsc_scanner.current_block() - settings.bsc_confirmations)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Could not fetch current BSC block: %s", exc)
+    elif payment_method == "usdt_trc20" and tron_scanner is not None:
+        try:
+            start_block = max(
+                0,
+                await tron_scanner.current_timestamp_ms()
+                - settings.tron_scan_safety_window_seconds * 1000,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not fetch current TRON timestamp: %s", exc)
 
     seed_order = db.create_order(
         telegram_user_id=user.id,
@@ -415,14 +424,14 @@ async def create_payment_order(
         if not settings.binance_history_enabled:
             extra = (
                 "\n\nAutomatic reference checking needs Binance Pay history API credentials. "
-                "This order was created, but verification is not active yet."
+                "This payment request was created, but verification is not active yet."
             )
         else:
             extra = "\n\nAfter sending, paste the transaction reference in this chat."
         await query.edit_message_text(
             "\n".join(
                 [
-                    f"<b>Order #{order.id}</b>",
+                    "<b>Payment details</b>",
                     payment_amount_line(order.amount_usdt),
                     f"<b>Binance ID:</b> <code>{h(settings.binance_pay_id)}</code>",
                     f"Expires: {h(order.expires_at.strftime('%Y-%m-%d %H:%M UTC'))}",
@@ -435,16 +444,23 @@ async def create_payment_order(
         context.user_data["flow_state"] = STATE_BINANCE_REFERENCE
         return
 
+    if payment_method == "usdt_trc20":
+        network = "TRON (TRC20)"
+        receiver_address = settings.usdt_trc20_receiver_address
+    else:
+        network = "BNB Smart Chain (BEP20)"
+        receiver_address = settings.usdt_bep20_receiver_address
+
     await query.edit_message_text(
         "\n".join(
             [
-                f"<b>Order #{order.id}</b>",
+                "<b>Payment details</b>",
                 payment_amount_line(order.amount_usdt),
-                f"<b>Network:</b> BNB Smart Chain (BEP20)",
-                f"<b>Address:</b> <code>{h(settings.usdt_bep20_receiver_address)}</code>",
+                f"<b>Network:</b> {h(network)}",
+                f"<b>Address:</b> <code>{h(receiver_address)}</code>",
                 f"Expires: {h(order.expires_at.strftime('%Y-%m-%d %H:%M UTC'))}",
                 "",
-                "The bot will confirm this automatically after enough block confirmations.",
+                "The bot will confirm this automatically after the payment is confirmed on-chain.",
             ]
         ),
         reply_markup=InlineKeyboardMarkup(
@@ -472,7 +488,8 @@ async def receive_binance_reference(update: Update, context: ContextTypes.DEFAUL
     order = db.get_order(int(order_id))
     if order.is_expired:
         db.mark_expired(order.id)
-        await update.message.reply_text("This order expired. Please create a new order.")
+        db.delete_order(order.id)
+        await update.message.reply_text("This payment request expired. Please create a new one.")
         context.user_data.pop("flow_state", None)
         return
     if not settings.binance_history_enabled:
@@ -507,17 +524,6 @@ async def receive_binance_reference(update: Update, context: ContextTypes.DEFAUL
     context.user_data.pop("flow_state", None)
 
 
-async def show_orders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    db: Database = context.application.bot_data["db"]
-    orders = db.list_recent_orders(update.effective_user.id)
-    if not orders:
-        await reply_or_edit(update, "You have no orders yet.", reply_markup=main_menu())
-        return
-    text = "\n\n".join(order_brief(order) for order in orders)
-    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Back to menu", callback_data="menu")]])
-    await reply_or_edit(update, text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
-
-
 async def fulfill_and_notify(context: ContextTypes.DEFAULT_TYPE, order: Order) -> None:
     canboso: CanbosoClient = context.application.bot_data["canboso"]
     db: Database = context.application.bot_data["db"]
@@ -530,10 +536,11 @@ async def fulfill_and_notify(context: ContextTypes.DEFAULT_TYPE, order: Order) -
         )
     except CanbosoError as exc:
         db.mark_failed(order.id, {"success": False, "message": str(exc)})
+        db.delete_order(order.id)
         await context.bot.send_message(
             chat_id=order.telegram_chat_id,
             text=(
-                f"Payment confirmed for order #{order.id}, but supplier fulfillment failed. "
+                "Payment confirmed, but supplier fulfillment failed. "
                 "Support has been notified."
             ),
         )
@@ -541,16 +548,19 @@ async def fulfill_and_notify(context: ContextTypes.DEFAULT_TYPE, order: Order) -
         return
 
     fulfilled = db.mark_fulfilled(order.id, payload)
-    await context.bot.send_message(
-        chat_id=order.telegram_chat_id,
-        text=delivery_message(fulfilled, payload),
-        parse_mode=ParseMode.HTML,
-    )
+    try:
+        await context.bot.send_message(
+            chat_id=order.telegram_chat_id,
+            text=delivery_message(fulfilled, payload),
+            parse_mode=ParseMode.HTML,
+        )
+    finally:
+        db.delete_order(order.id)
 
 
 async def check_usdt_order(context: ContextTypes.DEFAULT_TYPE, order: Order) -> bool:
     settings: Settings = context.application.bot_data["settings"]
-    scanner: BscUsdtScanner | None = context.application.bot_data.get("bsc_scanner")
+    scanner = usdt_scanner_for_order(context, order)
     if scanner is None:
         return False
     db: Database = context.application.bot_data["db"]
@@ -566,25 +576,45 @@ async def check_usdt_order(context: ContextTypes.DEFAULT_TYPE, order: Order) -> 
     return True
 
 
+def usdt_scanner_for_order(context: ContextTypes.DEFAULT_TYPE, order: Order):
+    if order.payment_method == "usdt_bep20":
+        return context.application.bot_data.get("bsc_scanner")
+    if order.payment_method == "usdt_trc20":
+        return context.application.bot_data.get("tron_scanner")
+    return None
+
+
 async def poll_usdt_payments(context: ContextTypes.DEFAULT_TYPE) -> None:
-    scanner: BscUsdtScanner | None = context.application.bot_data.get("bsc_scanner")
-    if scanner is None:
-        return
     db: Database = context.application.bot_data["db"]
-    for order in db.pending_orders("usdt_bep20"):
-        try:
-            found = await check_usdt_order(context, order)
-        except (BscError, Exception) as exc:  # noqa: BLE001
-            logger.warning("USDT scan failed for order %s: %s", order.id, exc)
+    for payment_method in USDT_PAYMENT_METHODS:
+        for order in db.pending_orders(payment_method):
+            try:
+                found = await check_usdt_order(context, order)
+            except (BscError, TronError, Exception) as exc:  # noqa: BLE001
+                logger.warning("USDT scan failed for order %s: %s", order.id, exc)
+                continue
+            if found:
+                continue
+            if order.is_expired:
+                db.mark_expired(order.id)
+                db.delete_order(order.id)
+                await context.bot.send_message(
+                    chat_id=order.telegram_chat_id,
+                    text="Your payment request expired before payment was confirmed.",
+                )
+
+
+async def expire_binance_payment_requests(context: ContextTypes.DEFAULT_TYPE) -> None:
+    db: Database = context.application.bot_data["db"]
+    for order in db.pending_orders("binance_id"):
+        if not order.is_expired:
             continue
-        if found:
-            continue
-        if order.is_expired:
-            db.mark_expired(order.id)
-            await context.bot.send_message(
-                chat_id=order.telegram_chat_id,
-                text=f"Order #{order.id} expired before payment was confirmed.",
-            )
+        db.mark_expired(order.id)
+        db.delete_order(order.id)
+        await context.bot.send_message(
+            chat_id=order.telegram_chat_id,
+            text="Your payment request expired before payment was confirmed.",
+        )
 
 
 async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -592,11 +622,12 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     db: Database = context.application.bot_data["db"]
     pending = [
         order
-        for order in db.pending_orders("usdt_bep20")
+        for order in db.pending_orders()
         if order.telegram_user_id == update.effective_user.id
+        and order.payment_method in USDT_PAYMENT_METHODS
     ]
     if not pending:
-        await update.message.reply_text("No pending USDT BEP20 orders were found.")
+        await update.message.reply_text("No pending USDT on-chain orders were found.")
         return
 
     confirmed = 0
@@ -604,7 +635,7 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         try:
             if await check_usdt_order(context, order):
                 confirmed += 1
-        except (BscError, Exception) as exc:  # noqa: BLE001
+        except (BscError, TronError, Exception) as exc:  # noqa: BLE001
             logger.warning("Manual USDT scan failed for order %s: %s", order.id, exc)
             await update.message.reply_text("Payment checking is temporarily unavailable.")
             return
@@ -662,11 +693,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.answer()
         await send_help(update, context)
         return
-    if data == "orders":
-        context.user_data.pop("flow_state", None)
-        await query.answer()
-        await show_orders(update, context)
-        return
     if data.startswith("products:"):
         context.user_data.pop("flow_state", None)
         await query.answer()
@@ -700,19 +726,30 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if data == "pay:usdt_bep20":
         await create_payment_order(update, context, "usdt_bep20")
         return
+    if data == "pay:usdt_trc20":
+        await create_payment_order(update, context, "usdt_trc20")
+        return
     if data.startswith("check_usdt:"):
         await query.answer()
         db: Database = context.application.bot_data["db"]
-        order = db.get_order(int(data.split(":", 1)[1]))
+        try:
+            order = db.get_order(int(data.split(":", 1)[1]))
+        except KeyError:
+            await query.answer("This payment request is no longer active.", show_alert=True)
+            return
         if order.telegram_user_id != update.effective_user.id:
-            await query.answer("This order does not belong to you.", show_alert=True)
+            await query.answer("This payment request does not belong to you.", show_alert=True)
             return
         if order.status != "awaiting_payment":
-            await query.edit_message_text(order_brief(order), parse_mode=ParseMode.HTML)
+            db.delete_order(order.id)
+            await query.answer("This payment request is no longer active.", show_alert=True)
+            return
+        if order.payment_method not in USDT_PAYMENT_METHODS:
+            await query.answer("This payment request is not an on-chain USDT payment.", show_alert=True)
             return
         try:
             found = await check_usdt_order(context, order)
-        except (BscError, Exception) as exc:  # noqa: BLE001
+        except (BscError, TronError, Exception) as exc:  # noqa: BLE001
             logger.warning("Manual USDT scan failed for order %s: %s", order.id, exc)
             await query.answer("Payment checking is temporarily unavailable.", show_alert=True)
             return
@@ -775,22 +812,37 @@ def build_application(settings: Settings) -> Application:
             confirmations=settings.bsc_confirmations,
             log_chunk_size=settings.bsc_log_chunk_size,
         )
+    if settings.usdt_trc20_enabled:
+        app.bot_data["tron_scanner"] = TronUsdtScanner(
+            api_base_url=settings.tron_grid_base_url,
+            api_key=settings.tron_grid_api_key,
+            usdt_contract=settings.tron_usdt_contract,
+            receiver_address=settings.usdt_trc20_receiver_address,
+            page_limit=settings.tron_page_limit,
+            scan_safety_window_seconds=settings.tron_scan_safety_window_seconds,
+        )
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("products", products_command))
-    app.add_handler(CommandHandler("orders", orders_command))
     app.add_handler(CommandHandler("check", check_command))
     app.add_handler(CommandHandler("broadcast", broadcast_command))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    if settings.usdt_bep20_enabled:
+    if settings.usdt_bep20_enabled or settings.usdt_trc20_enabled:
         app.job_queue.run_repeating(
             poll_usdt_payments,
             interval=settings.payment_poll_interval_seconds,
             first=10,
             name="poll_usdt_payments",
+        )
+    if settings.binance_id_enabled:
+        app.job_queue.run_repeating(
+            expire_binance_payment_requests,
+            interval=settings.payment_poll_interval_seconds,
+            first=30,
+            name="expire_binance_payment_requests",
         )
     return app
 

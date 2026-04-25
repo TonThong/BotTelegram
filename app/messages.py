@@ -32,22 +32,6 @@ def product_summary(product: Product, *, unit_usdt: Decimal | None = None) -> st
     return "\n".join(parts)
 
 
-def order_brief(order: Order) -> str:
-    details = [
-        f"Order #{order.id}",
-        f"Product: {h(order.product_name)}",
-        f"Status: {h(order.status.replace('_', ' ').title())}",
-        f"Amount: {h(format_usdt(order.amount_usdt))}",
-    ]
-    if order.payment_method == "binance_id":
-        details.append("Payment: Binance ID")
-    elif order.payment_method == "usdt_bep20":
-        details.append("Payment: USDT BEP20")
-    if order.canboso_order_code:
-        details.append(f"Canboso order: {h(order.canboso_order_code)}")
-    return "\n".join(details)
-
-
 def payment_amount_line(amount: Decimal) -> str:
     return f"<b>Exact amount:</b> <code>{h(format_usdt(amount))}</code>"
 
@@ -56,7 +40,6 @@ def delivery_message(order: Order, payload: dict[str, Any]) -> str:
     lines = [
         "Payment confirmed. Your order is ready.",
         "",
-        f"<b>Order #{order.id}</b>",
         f"Product: {h(payload.get('productType') or order.product_name)}",
     ]
 
