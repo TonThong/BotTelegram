@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import logging
+import time
 from decimal import Decimal
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.error import Forbidden, TelegramError
 from telegram.ext import (
@@ -33,8 +34,8 @@ logger = logging.getLogger(__name__)
 
 STATE_QUANTITY = "quantity"
 STATE_SLOT_EMAIL = "slot_email"
-STATE_BINANCE_REFERENCE = "binance_reference"
 USDT_PAYMENT_METHODS = ("usdt_bep20", "usdt_trc20")
+BOT_COMMANDS = (BotCommand("start", "Open the main menu"),)
 
 
 def product_is_available(product: Product) -> bool:
@@ -109,6 +110,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.callback_query.edit_message_text(text, reply_markup=main_menu(settings))
 
 
+async def configure_bot_commands(app: Application) -> None:
+    await app.bot.set_my_commands(BOT_COMMANDS)
+
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     track_user(update, context)
     await send_help(update, context)
@@ -117,7 +122,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def send_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
         "Payment help\n\n"
-        "Binance ID: send the exact USDT amount, then paste the transaction reference here.\n\n"
+        "Binance ID: send the exact USDT amount. The bot checks Binance Pay History automatically; no transaction ID is needed.\n\n"
         "USDT BEP20: send the exact amount to the shown BEP20 address. The bot checks the blockchain automatically.\n\n"
         "USDT TRC20: send the exact amount to the shown TRC20 address. The bot checks the blockchain automatically.\n\n"
         "Use the exact amount shown for your order. It includes a small unique fraction for matching."
@@ -316,7 +321,7 @@ async def choose_payment(
 
     settings: Settings = context.application.bot_data["settings"]
     rows: list[list[InlineKeyboardButton]] = []
-    if settings.binance_id_enabled:
+    if settings.binance_id_enabled and settings.binance_history_enabled:
         rows.append([InlineKeyboardButton("Pay with Binance ID", callback_data="pay:binance_id")])
     if settings.usdt_bep20_enabled:
         rows.append([InlineKeyboardButton("Pay with USDT BEP20", callback_data="pay:usdt_bep20")])
@@ -422,12 +427,11 @@ async def create_payment_order(
 
     if payment_method == "binance_id":
         if not settings.binance_history_enabled:
-            extra = (
-                "\n\nAutomatic reference checking needs Binance Pay history API credentials. "
-                "This payment request was created, but verification is not active yet."
+            await query.edit_message_text(
+                "Binance ID auto-checking is not configured yet. Please choose another payment method."
             )
-        else:
-            extra = "\n\nAfter sending, paste the transaction reference in this chat."
+            db.delete_order(order.id)
+            return
         await query.edit_message_text(
             "\n".join(
                 [
@@ -435,13 +439,16 @@ async def create_payment_order(
                     payment_amount_line(order.amount_usdt),
                     f"<b>Binance ID:</b> <code>{h(settings.binance_pay_id)}</code>",
                     f"Expires: {h(order.expires_at.strftime('%Y-%m-%d %H:%M UTC'))}",
-                    extra,
+                    "",
+                    "The bot will confirm this automatically from Binance Pay History. No transaction ID is needed.",
                 ]
+            ),
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("Check payment", callback_data=f"check_binance:{order.id}")]]
             ),
             parse_mode=ParseMode.HTML,
         )
-        context.user_data["awaiting_binance_order_id"] = order.id
-        context.user_data["flow_state"] = STATE_BINANCE_REFERENCE
+        context.user_data.pop("flow_state", None)
         return
 
     if payment_method == "usdt_trc20":
@@ -476,52 +483,35 @@ def update_order_amount(db: Database, order_id: int, amount: Decimal) -> None:
         con.execute("UPDATE orders SET amount_usdt = ? WHERE id = ?", (str(amount), order_id))
 
 
-async def receive_binance_reference(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def check_binance_order(
+    context: ContextTypes.DEFAULT_TYPE,
+    order: Order,
+    *,
+    transactions: list[dict] | None = None,
+) -> bool:
     settings: Settings = context.application.bot_data["settings"]
     db: Database = context.application.bot_data["db"]
-    reference = (update.message.text or "").strip()
-    order_id = context.user_data.get("awaiting_binance_order_id")
-    if not order_id:
-        await update.message.reply_text("No Binance payment is waiting for a reference.")
-        context.user_data.pop("flow_state", None)
-        return
-    order = db.get_order(int(order_id))
-    if order.is_expired:
-        db.mark_expired(order.id)
-        db.delete_order(order.id)
-        await update.message.reply_text("This payment request expired. Please create a new one.")
-        context.user_data.pop("flow_state", None)
-        return
-    if not settings.binance_history_enabled:
-        await update.message.reply_text(
-            "Reference checking is not configured yet. Please contact support."
-        )
-        return
-
-    verifier: BinancePayHistoryClient = context.application.bot_data["binance_pay"]
-    await update.message.reply_text("Checking the payment reference...")
-    try:
-        match = await verifier.verify_reference(
+    verifier: BinancePayHistoryClient | None = context.application.bot_data.get("binance_pay")
+    if verifier is None:
+        return False
+    if transactions is None:
+        match = await verifier.find_payment(
             order=order,
-            reference=reference,
             tolerance=settings.payment_amount_tolerance_usdt,
             receiver_binance_id=settings.binance_pay_id,
         )
-    except BinancePayError as exc:
-        logger.warning("Binance verification failed: %s", exc)
-        await update.message.reply_text("Could not verify this reference right now. Try again shortly.")
-        return
-
-    if match is None:
-        await update.message.reply_text(
-            "Payment was not found. Check the reference and exact amount, then send it again."
+    else:
+        match = verifier.match_transactions(
+            order=order,
+            transactions=transactions,
+            tolerance=settings.payment_amount_tolerance_usdt,
+            receiver_binance_id=settings.binance_pay_id,
         )
-        return
-
+    if match is None:
+        return False
     paid_order = db.mark_paid(order.id, payment_reference=match.transaction_id)
     await fulfill_and_notify(context, paid_order)
-    context.user_data.pop("awaiting_binance_order_id", None)
-    context.user_data.pop("flow_state", None)
+    return True
 
 
 async def fulfill_and_notify(context: ContextTypes.DEFAULT_TYPE, order: Order) -> None:
@@ -604,10 +594,14 @@ async def poll_usdt_payments(context: ContextTypes.DEFAULT_TYPE) -> None:
                 )
 
 
-async def expire_binance_payment_requests(context: ContextTypes.DEFAULT_TYPE) -> None:
+async def poll_binance_payments(context: ContextTypes.DEFAULT_TYPE) -> None:
     db: Database = context.application.bot_data["db"]
-    for order in db.pending_orders("binance_id"):
+    settings: Settings = context.application.bot_data["settings"]
+    pending_orders = db.pending_orders("binance_id")
+    active_orders: list[Order] = []
+    for order in pending_orders:
         if not order.is_expired:
+            active_orders.append(order)
             continue
         db.mark_expired(order.id)
         db.delete_order(order.id)
@@ -615,6 +609,27 @@ async def expire_binance_payment_requests(context: ContextTypes.DEFAULT_TYPE) ->
             chat_id=order.telegram_chat_id,
             text="Your payment request expired before payment was confirmed.",
         )
+    if not active_orders or not settings.binance_history_enabled:
+        return
+
+    verifier: BinancePayHistoryClient = context.application.bot_data["binance_pay"]
+    start_time_ms = min(int(order.created_at.timestamp() * 1000) for order in active_orders) - 60_000
+    end_time_ms = int(time.time() * 1000)
+    try:
+        transactions = await verifier.get_pay_transactions(
+            start_time_ms=start_time_ms,
+            end_time_ms=end_time_ms,
+            limit=100,
+        )
+    except BinancePayError as exc:
+        logger.warning("Binance Pay history scan failed: %s", exc)
+        return
+
+    for order in active_orders:
+        try:
+            await check_binance_order(context, order, transactions=transactions)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Binance Pay scan failed for order %s: %s", order.id, exc)
 
 
 async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -624,25 +639,33 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         order
         for order in db.pending_orders()
         if order.telegram_user_id == update.effective_user.id
-        and order.payment_method in USDT_PAYMENT_METHODS
+        and (order.payment_method in USDT_PAYMENT_METHODS or order.payment_method == "binance_id")
     ]
     if not pending:
-        await update.message.reply_text("No pending USDT on-chain orders were found.")
+        await update.message.reply_text("No pending payment orders were found.")
         return
 
     confirmed = 0
     for order in pending:
         try:
-            if await check_usdt_order(context, order):
+            if order.is_expired:
+                db.mark_expired(order.id)
+                db.delete_order(order.id)
+                continue
+            if order.payment_method == "binance_id":
+                found = await check_binance_order(context, order)
+            else:
+                found = await check_usdt_order(context, order)
+            if found:
                 confirmed += 1
-        except (BscError, TronError, Exception) as exc:  # noqa: BLE001
-            logger.warning("Manual USDT scan failed for order %s: %s", order.id, exc)
+        except (BinancePayError, BscError, TronError, Exception) as exc:  # noqa: BLE001
+            logger.warning("Manual payment scan failed for order %s: %s", order.id, exc)
             await update.message.reply_text("Payment checking is temporarily unavailable.")
             return
 
     if confirmed == 0:
         await update.message.reply_text(
-            "No confirmed payment was found yet. If you just paid, wait for confirmations and try again."
+            "No confirmed payment was found yet. If you just paid, wait a moment and try again."
         )
 
 
@@ -729,6 +752,42 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if data == "pay:usdt_trc20":
         await create_payment_order(update, context, "usdt_trc20")
         return
+    if data.startswith("check_binance:"):
+        await query.answer()
+        db: Database = context.application.bot_data["db"]
+        try:
+            order = db.get_order(int(data.split(":", 1)[1]))
+        except KeyError:
+            await query.answer("This payment request is no longer active.", show_alert=True)
+            return
+        if order.telegram_user_id != update.effective_user.id:
+            await query.answer("This payment request does not belong to you.", show_alert=True)
+            return
+        if order.status != "awaiting_payment":
+            db.delete_order(order.id)
+            await query.answer("This payment request is no longer active.", show_alert=True)
+            return
+        if order.payment_method != "binance_id":
+            await query.answer("This payment request is not a Binance ID payment.", show_alert=True)
+            return
+        if order.is_expired:
+            db.mark_expired(order.id)
+            db.delete_order(order.id)
+            await query.answer("This payment request expired.", show_alert=True)
+            return
+        try:
+            found = await check_binance_order(context, order)
+        except BinancePayError as exc:
+            logger.warning("Manual Binance Pay scan failed for order %s: %s", order.id, exc)
+            await query.answer("Payment checking is temporarily unavailable.", show_alert=True)
+            return
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Manual Binance Pay scan failed for order %s: %s", order.id, exc)
+            await query.answer("Payment checking is temporarily unavailable.", show_alert=True)
+            return
+        if not found:
+            await query.answer("No matching Binance Pay payment found yet.", show_alert=True)
+        return
     if data.startswith("check_usdt:"):
         await query.answer()
         db: Database = context.application.bot_data["db"]
@@ -768,9 +827,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if state == STATE_SLOT_EMAIL:
         await receive_slot_email(update, context)
         return
-    if state == STATE_BINANCE_REFERENCE:
-        await receive_binance_reference(update, context)
-        return
     await update.message.reply_text("Use the menu or /products to start an order.")
 
 
@@ -793,7 +849,7 @@ async def reply_or_edit(
 
 def build_application(settings: Settings) -> Application:
     db = Database(settings.database_path)
-    app = Application.builder().token(settings.telegram_bot_token).build()
+    app = Application.builder().token(settings.telegram_bot_token).post_init(configure_bot_commands).build()
     app.bot_data["settings"] = settings
     app.bot_data["db"] = db
     app.bot_data["canboso"] = CanbosoClient(settings.canboso_base_url, settings.canboso_api_key)
@@ -839,10 +895,10 @@ def build_application(settings: Settings) -> Application:
         )
     if settings.binance_id_enabled:
         app.job_queue.run_repeating(
-            expire_binance_payment_requests,
+            poll_binance_payments,
             interval=settings.payment_poll_interval_seconds,
             first=30,
-            name="expire_binance_payment_requests",
+            name="poll_binance_payments",
         )
     return app
 

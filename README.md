@@ -4,8 +4,8 @@ This project builds an English-language Telegram shop bot that:
 
 - lists products from the Canboso buyer API;
 - accepts Binance ID, USDT BEP20, and USDT TRC20 payment flows;
+- automatically checks Binance ID payments through Binance Pay history;
 - automatically checks USDT BEP20 transfers on BNB Smart Chain and USDT TRC20 transfers on TRON;
-- verifies Binance ID references through Binance Pay history when API credentials are configured;
 - purchases from Canboso after payment is confirmed;
 - stores only active payment requests in SQLite and removes finished/expired requests.
 
@@ -37,7 +37,7 @@ python -m app.main
 The local `.env` file has already been created. Fill these before accepting real payments:
 
 - `BINANCE_PAY_ID`: the Binance ID buyers should send to.
-- `BINANCE_PAY_HISTORY_API_KEY` and `BINANCE_PAY_HISTORY_API_SECRET`: required for Binance ID reference checks.
+- `BINANCE_PAY_HISTORY_API_KEY` and `BINANCE_PAY_HISTORY_API_SECRET`: required for automatic Binance ID checks.
 - `USDT_BEP20_RECEIVER_ADDRESS`: the BEP20 wallet address buyers should send USDT to.
 - `BSC_RPC_URL`: use a reliable RPC provider in production. The Binance dataseed RPC often rejects `eth_getLogs`, so the default uses PublicNode with fallback URLs.
 - `USDT_TRC20_RECEIVER_ADDRESS`: the TRC20 wallet address buyers should send USDT to.
@@ -53,9 +53,9 @@ For every order, the bot calculates a USDT amount from the Canboso source price 
 Binance ID:
 
 1. The bot shows the Binance Pay ID and exact amount.
-2. The buyer sends USDT and pastes the transaction reference.
-3. The bot queries `/sapi/v1/pay/transactions`.
-4. If transaction ID, currency, amount, and time match, the order is fulfilled.
+2. The buyer sends the exact USDT amount.
+3. A background job queries `/sapi/v1/pay/transactions`.
+4. If currency, amount, receiver, and time match, the order is fulfilled automatically. The buyer does not need to paste a transaction ID.
 
 USDT BEP20:
 
@@ -80,6 +80,6 @@ USDT TRC20:
 
 - `/start`: open the main menu
 - `/products`: browse products
-- `/check`: check pending USDT BEP20/TRC20 orders immediately
+- `/check`: check pending Binance ID and USDT BEP20/TRC20 orders immediately
 - `/help`: show payment help
 - `/broadcast message`: admin only, send a plain-text message to all users who have interacted with the bot
