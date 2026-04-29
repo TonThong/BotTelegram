@@ -13,6 +13,10 @@ class CanbosoError(RuntimeError):
     pass
 
 
+VND_PER_USD = Decimal("34000")
+VND_CURRENCIES = {"VND", "VNĐ", "DONG", "Đ", "₫"}
+
+
 @dataclass(frozen=True)
 class Product:
     product_id: str
@@ -29,6 +33,7 @@ class Product:
     requires_customer_email: bool
     requires_slot_months: bool
     quantity_fixed: int | None
+    apply_markup: bool = True
 
     @classmethod
     def from_api(cls, payload: dict[str, Any]) -> "Product":
@@ -64,8 +69,11 @@ class Product:
     def estimated_unit_usdt(self) -> Decimal:
         if self.usd_pricing is not None:
             return self.usd_pricing
-        if self.wallet_currency.upper() in {"USD", "USDT"}:
+        currency = self.wallet_currency.strip().upper()
+        if currency in {"USD", "USDT"}:
             return self.wallet_pricing
+        if currency in VND_CURRENCIES:
+            return self.wallet_pricing / VND_PER_USD
         raise CanbosoError(
             f"Product {self.product_id} has no USD price. Configure a USD buyer key or product pricing."
         )

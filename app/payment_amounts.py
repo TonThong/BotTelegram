@@ -14,6 +14,8 @@ def apply_markup(amount: Decimal, markup_percent: Decimal) -> Decimal:
 
 
 def product_unit_usdt(product: Product, *, markup_percent: Decimal) -> Decimal:
+    if not product.apply_markup:
+        return product.estimated_unit_usdt().quantize(USDT_QUANT, rounding=ROUND_UP)
     return apply_markup(product.estimated_unit_usdt(), markup_percent)
 
 

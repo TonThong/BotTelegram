@@ -37,6 +37,8 @@ def _get_csv(name: str, default: str = "") -> tuple[str, ...]:
 @dataclass(frozen=True)
 class Settings:
     telegram_bot_token: str
+    product_source: str
+    products_dir: Path
     canboso_api_key: str
     canboso_base_url: str
     database_path: Path
@@ -86,14 +88,28 @@ class Settings:
 def load_settings() -> Settings:
     load_dotenv()
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    products_dir = Path(os.getenv("PRODUCTS_DIR", "products"))
     canboso_key = os.getenv("CANBOSO_API_KEY", "").strip()
+    product_source = os.getenv("PRODUCT_SOURCE", "auto").strip().lower() or "auto"
+    if product_source == "auto":
+        has_local = _has_local_product_files(products_dir)
+        if has_local and canboso_key:
+            product_source = "hybrid"
+        elif has_local:
+            product_source = "local"
+        else:
+            product_source = "api"
+    if product_source not in {"api", "local", "hybrid"}:
+        raise RuntimeError("PRODUCT_SOURCE must be api, local, hybrid, or auto.")
     if not token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is required.")
-    if not canboso_key:
+    if product_source in {"api", "hybrid"} and not canboso_key:
         raise RuntimeError("CANBOSO_API_KEY is required.")
 
     return Settings(
         telegram_bot_token=token,
+        product_source=product_source,
+        products_dir=products_dir,
         canboso_api_key=canboso_key,
         canboso_base_url=os.getenv("CANBOSO_BASE_URL", "https://canboso.com").rstrip("/"),
         database_path=Path(os.getenv("DATABASE_PATH", "bot.sqlite3")),
@@ -141,3 +157,7 @@ def load_settings() -> Settings:
             "PAYMENT_UNIQUE_FRACTION_MAX_USDT", "0.009999"
         ),
     )
+
+
+def _has_local_product_files(products_dir: Path) -> bool:
+    return products_dir.exists() and any(products_dir.glob("*.txt"))

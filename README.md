@@ -2,12 +2,39 @@
 
 This project builds an English-language Telegram shop bot that:
 
-- lists products from the Canboso buyer API;
+- lists products from the Canboso buyer API or local `products/*.txt` files;
 - accepts Binance ID, USDT BEP20, and USDT TRC20 payment flows;
 - automatically checks Binance ID payments through Binance Pay history;
 - automatically checks USDT BEP20 transfers on BNB Smart Chain and USDT TRC20 transfers on TRON;
 - purchases from Canboso after payment is confirmed;
 - stores only active payment requests in SQLite and removes finished/expired requests.
+
+## Product Sources
+
+If `PRODUCT_SOURCE=auto`, the bot uses both Canboso API products and local
+`products/*.txt` files when both are configured. Set `PRODUCT_SOURCE=api` to force
+the live API, `PRODUCT_SOURCE=local` to force local files, or `PRODUCT_SOURCE=hybrid`
+to always load both.
+
+Each local `.txt` file is one product:
+
+```text
+id: cdk_gpt_plus_1m_no_war
+name: CDK GPT PLUS 1M (No War)
+price: 20.00
+currency: USDT
+
+description:
+ChatGPT Plus CDK valid for 1 month.
+
+data:
+```
+
+After payment is confirmed, local fulfillment delivers the first item from `data:`
+and moves it to `sold:` so it is not sold again. Local availability is counted from
+the number of non-empty lines under `data:`; one line equals one sellable unit.
+Local `price:` is the selling price shown to buyers; `SELLING_MARKUP_PERCENT` only
+applies to live API products.
 
 ## API Sources
 

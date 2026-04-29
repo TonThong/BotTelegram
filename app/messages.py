@@ -6,7 +6,7 @@ from typing import Any
 
 from app.canboso_client import Product
 from app.database import Order
-from app.text_utils import format_usdt
+from app.text_utils import format_usdt, format_usdt_price
 
 
 def h(value: Any) -> str:
@@ -15,7 +15,7 @@ def h(value: Any) -> str:
 
 def product_summary(product: Product, *, unit_usdt: Decimal | None = None) -> str:
     availability = "Available now" if product.available is None else f"{product.available} available"
-    price = format_usdt(unit_usdt) if unit_usdt is not None else (
+    price = format_usdt_price(unit_usdt) if unit_usdt is not None else (
         product.wallet_pricing_text or f"{product.wallet_pricing} {product.wallet_currency}"
     )
     parts = [
@@ -53,6 +53,13 @@ def delivery_message(order: Order, payload: dict[str, Any]) -> str:
                 lines.append(f"   Password: <code>{h(account['password'])}</code>")
             if account.get("verifyEmail"):
                 lines.append(f"   Recovery email: <code>{h(account['verifyEmail'])}</code>")
+
+    items = payload.get("deliveredItems") or payload.get("deliveredKeys") or []
+    if items:
+        lines.append("")
+        lines.append("<b>Delivered items</b>")
+        for index, item in enumerate(items, start=1):
+            lines.append(f"{index}. <code>{h(item)}</code>")
 
     if payload.get("workspaceInviteStatus"):
         lines.append("")

@@ -3,9 +3,9 @@ from __future__ import annotations
 import logging
 import time
 from decimal import Decimal
-from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import BotCommand, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
-from telegram.error import Forbidden, TelegramError
+from telegram.error import BadRequest, Forbidden, TelegramError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -20,9 +20,11 @@ from app.bsc import BscError, BscUsdtScanner
 from app.canboso_client import CanbosoClient, CanbosoError, Product
 from app.config import Settings, load_settings
 from app.database import Database, Order
+from app.local_products import LocalProductsClient
 from app.messages import delivery_message, h, payment_amount_line, product_summary
 from app.payment_amounts import amount_with_unique_fraction, base_usdt_amount, product_unit_usdt
-from app.text_utils import format_usdt
+from app.product_sources import HybridProductsClient
+from app.text_utils import format_usdt_price
 from app.tron import TronError, TronUsdtScanner
 
 
@@ -36,6 +38,18 @@ STATE_QUANTITY = "quantity"
 STATE_SLOT_EMAIL = "slot_email"
 USDT_PAYMENT_METHODS = ("usdt_bep20", "usdt_trc20")
 BOT_COMMANDS = (BotCommand("start", "Open the main menu"),)
+STALE_CALLBACK_QUERY_ERROR = "Query is too old and response timeout expired or query id is invalid"
+
+
+async def safe_answer_callback(query: CallbackQuery, *args, **kwargs) -> bool:
+    try:
+        await query.answer(*args, **kwargs)
+    except BadRequest as exc:
+        if STALE_CALLBACK_QUERY_ERROR in str(exc):
+            logger.info("Ignoring stale callback query %s: %s", query.id, exc)
+            return False
+        raise
+    return True
 
 
 def product_is_available(product: Product) -> bool:
@@ -47,7 +61,9 @@ def product_has_quantity(product: Product, quantity: int) -> bool:
 
 
 def product_label(product: Product, settings: Settings) -> str:
-    price = format_usdt(product_unit_usdt(product, markup_percent=settings.selling_markup_percent))
+    price = format_usdt_price(
+        product_unit_usdt(product, markup_percent=settings.selling_markup_percent)
+    )
     suffix = f" - {price}"
     name_limit = max(8, 64 - len(suffix))
     name = product.name
@@ -234,7 +250,7 @@ async def show_product(update: Update, context: ContextTypes.DEFAULT_TYPE, produ
 
 
 async def ask_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.callback_query.answer()
+    await safe_answer_callback(update.callback_query)
     context.user_data["flow_state"] = STATE_QUANTITY
     await update.callback_query.edit_message_text("Enter the quantity you want to buy.")
 
@@ -259,11 +275,13 @@ async def receive_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 async def select_slot_months(update: Update, context: ContextTypes.DEFAULT_TYPE, months: int) -> None:
     product: Product | None = context.user_data.get("product")
     if product is None:
-        await update.callback_query.answer("Please select a product again.", show_alert=True)
+        await safe_answer_callback(
+            update.callback_query, "Please select a product again.", show_alert=True
+        )
         return
     context.user_data["slot_months"] = months
     context.user_data["flow_state"] = STATE_SLOT_EMAIL
-    await update.callback_query.answer()
+    await safe_answer_callback(update.callback_query)
     await update.callback_query.edit_message_text("Enter the customer email for the workspace invite.")
 
 
@@ -339,7 +357,7 @@ async def choose_payment(
     if slot_months:
         label = f"{slot_months} month(s)"
     await update.effective_message.reply_text(
-        f"Selected: {product.name}\nQuantity: {label}\nPrice: {format_usdt(base_amount)}\n\nChoose a payment method.",
+        f"Selected: {product.name}\nQuantity: {label}\nPrice: {format_usdt_price(base_amount)}\n\nChoose a payment method.",
         reply_markup=InlineKeyboardMarkup(rows),
     )
 
@@ -348,7 +366,7 @@ async def create_payment_order(
     update: Update, context: ContextTypes.DEFAULT_TYPE, payment_method: str
 ) -> None:
     query = update.callback_query
-    await query.answer()
+    await safe_answer_callback(query)
     draft = context.user_data.get("draft_order")
     if not draft:
         await query.edit_message_text("Your selection expired. Please choose a product again.")
@@ -708,29 +726,29 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     data = query.data or ""
     if data == "menu":
         context.user_data.pop("flow_state", None)
-        await query.answer()
+        await safe_answer_callback(query)
         await start(update, context)
         return
     if data == "help":
         context.user_data.pop("flow_state", None)
-        await query.answer()
+        await safe_answer_callback(query)
         await send_help(update, context)
         return
     if data.startswith("products:"):
         context.user_data.pop("flow_state", None)
-        await query.answer()
+        await safe_answer_callback(query)
         await show_products(update, context, page=int(data.split(":", 1)[1]))
         return
     if data.startswith("product:"):
         context.user_data.pop("flow_state", None)
-        await query.answer()
+        await safe_answer_callback(query)
         await show_product(update, context, data.split(":", 1)[1])
         return
     if data == "qty:custom":
         await ask_quantity(update, context)
         return
     if data.startswith("qty:"):
-        await query.answer()
+        await safe_answer_callback(query)
         context.user_data.pop("flow_state", None)
         await choose_payment(
             update,
@@ -753,69 +771,95 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await create_payment_order(update, context, "usdt_trc20")
         return
     if data.startswith("check_binance:"):
-        await query.answer()
+        await safe_answer_callback(query)
         db: Database = context.application.bot_data["db"]
         try:
             order = db.get_order(int(data.split(":", 1)[1]))
         except KeyError:
-            await query.answer("This payment request is no longer active.", show_alert=True)
+            await safe_answer_callback(
+                query, "This payment request is no longer active.", show_alert=True
+            )
             return
         if order.telegram_user_id != update.effective_user.id:
-            await query.answer("This payment request does not belong to you.", show_alert=True)
+            await safe_answer_callback(
+                query, "This payment request does not belong to you.", show_alert=True
+            )
             return
         if order.status != "awaiting_payment":
             db.delete_order(order.id)
-            await query.answer("This payment request is no longer active.", show_alert=True)
+            await safe_answer_callback(
+                query, "This payment request is no longer active.", show_alert=True
+            )
             return
         if order.payment_method != "binance_id":
-            await query.answer("This payment request is not a Binance ID payment.", show_alert=True)
+            await safe_answer_callback(
+                query, "This payment request is not a Binance ID payment.", show_alert=True
+            )
             return
         if order.is_expired:
             db.mark_expired(order.id)
             db.delete_order(order.id)
-            await query.answer("This payment request expired.", show_alert=True)
+            await safe_answer_callback(query, "This payment request expired.", show_alert=True)
             return
         try:
             found = await check_binance_order(context, order)
         except BinancePayError as exc:
             logger.warning("Manual Binance Pay scan failed for order %s: %s", order.id, exc)
-            await query.answer("Payment checking is temporarily unavailable.", show_alert=True)
+            await safe_answer_callback(
+                query, "Payment checking is temporarily unavailable.", show_alert=True
+            )
             return
         except Exception as exc:  # noqa: BLE001
             logger.warning("Manual Binance Pay scan failed for order %s: %s", order.id, exc)
-            await query.answer("Payment checking is temporarily unavailable.", show_alert=True)
+            await safe_answer_callback(
+                query, "Payment checking is temporarily unavailable.", show_alert=True
+            )
             return
         if not found:
-            await query.answer("No matching Binance Pay payment found yet.", show_alert=True)
+            await safe_answer_callback(
+                query, "No matching Binance Pay payment found yet.", show_alert=True
+            )
         return
     if data.startswith("check_usdt:"):
-        await query.answer()
+        await safe_answer_callback(query)
         db: Database = context.application.bot_data["db"]
         try:
             order = db.get_order(int(data.split(":", 1)[1]))
         except KeyError:
-            await query.answer("This payment request is no longer active.", show_alert=True)
+            await safe_answer_callback(
+                query, "This payment request is no longer active.", show_alert=True
+            )
             return
         if order.telegram_user_id != update.effective_user.id:
-            await query.answer("This payment request does not belong to you.", show_alert=True)
+            await safe_answer_callback(
+                query, "This payment request does not belong to you.", show_alert=True
+            )
             return
         if order.status != "awaiting_payment":
             db.delete_order(order.id)
-            await query.answer("This payment request is no longer active.", show_alert=True)
+            await safe_answer_callback(
+                query, "This payment request is no longer active.", show_alert=True
+            )
             return
         if order.payment_method not in USDT_PAYMENT_METHODS:
-            await query.answer("This payment request is not an on-chain USDT payment.", show_alert=True)
+            await safe_answer_callback(
+                query,
+                "This payment request is not an on-chain USDT payment.",
+                show_alert=True,
+            )
             return
         try:
             found = await check_usdt_order(context, order)
         except (BscError, TronError, Exception) as exc:  # noqa: BLE001
             logger.warning("Manual USDT scan failed for order %s: %s", order.id, exc)
-            await query.answer("Payment checking is temporarily unavailable.", show_alert=True)
+            await safe_answer_callback(
+                query, "Payment checking is temporarily unavailable.", show_alert=True
+            )
             return
         if not found:
-            await query.answer("No confirmed payment found yet.", show_alert=True)
+            await safe_answer_callback(query, "No confirmed payment found yet.", show_alert=True)
         return
-    await query.answer()
+    await safe_answer_callback(query)
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -852,7 +896,15 @@ def build_application(settings: Settings) -> Application:
     app = Application.builder().token(settings.telegram_bot_token).post_init(configure_bot_commands).build()
     app.bot_data["settings"] = settings
     app.bot_data["db"] = db
-    app.bot_data["canboso"] = CanbosoClient(settings.canboso_base_url, settings.canboso_api_key)
+    if settings.product_source == "local":
+        app.bot_data["canboso"] = LocalProductsClient(settings.products_dir)
+    elif settings.product_source == "hybrid":
+        app.bot_data["canboso"] = HybridProductsClient(
+            CanbosoClient(settings.canboso_base_url, settings.canboso_api_key),
+            LocalProductsClient(settings.products_dir),
+        )
+    else:
+        app.bot_data["canboso"] = CanbosoClient(settings.canboso_base_url, settings.canboso_api_key)
     if settings.binance_history_enabled:
         app.bot_data["binance_pay"] = BinancePayHistoryClient(
             base_url=settings.binance_pay_history_base_url,

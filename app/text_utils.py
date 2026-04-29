@@ -25,6 +25,11 @@ def format_usdt(amount: Decimal) -> str:
     return f"{normalized:f} USDT"
 
 
+def format_usdt_price(amount: Decimal) -> str:
+    normalized = amount.quantize(Decimal("0.01"), rounding=ROUND_UP)
+    return f"{normalized:.2f} USDT"
+
+
 def normalize_decimal(value: Decimal | int | float | str | None, default: str = "0") -> Decimal:
     if value is None:
         return Decimal(default)
