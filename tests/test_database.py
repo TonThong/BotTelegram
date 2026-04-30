@@ -22,7 +22,7 @@ def create_test_order(db: Database, *, expiry_minutes: int = 45):
     )
 
 
-def test_database_startup_removes_terminal_orders(tmp_path) -> None:
+def test_database_startup_keeps_terminal_orders_for_history(tmp_path) -> None:
     path = tmp_path / "bot.sqlite3"
     db = Database(path)
     order = create_test_order(db)
@@ -30,16 +30,18 @@ def test_database_startup_removes_terminal_orders(tmp_path) -> None:
 
     reopened = Database(path)
 
+    assert reopened.get_order(order.id).status == "expired"
     assert reopened.pending_orders() == []
 
 
-def test_database_startup_removes_expired_pending_orders(tmp_path) -> None:
+def test_database_startup_marks_expired_pending_orders_for_history(tmp_path) -> None:
     path = tmp_path / "bot.sqlite3"
     db = Database(path)
-    create_test_order(db, expiry_minutes=-1)
+    order = create_test_order(db, expiry_minutes=-1)
 
     reopened = Database(path)
 
+    assert reopened.get_order(order.id).status == "expired"
     assert reopened.pending_orders() == []
 
 

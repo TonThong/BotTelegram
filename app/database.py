@@ -82,7 +82,6 @@ class Database:
             con.close()
 
     def init(self) -> None:
-        removed_orders = 0
         with self.connect() as con:
             con.execute(
                 """
@@ -160,21 +159,14 @@ class Database:
                 """,
                 (now, now),
             )
-            removed_orders += con.execute(
+            con.execute(
                 """
-                DELETE FROM orders
-                WHERE status IN ('fulfilled', 'expired', 'failed')
-                """
-            ).rowcount
-            removed_orders += con.execute(
-                """
-                DELETE FROM orders
+                UPDATE orders
+                SET status = 'expired'
                 WHERE status = 'awaiting_payment' AND expires_at < ?
                 """,
                 (now,),
-            ).rowcount
-        if removed_orders > 0:
-            self.vacuum()
+            )
 
     def upsert_user(
         self,

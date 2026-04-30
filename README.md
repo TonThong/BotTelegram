@@ -7,7 +7,7 @@ This project builds an English-language Telegram shop bot that:
 - automatically checks Binance ID payments through Binance Pay history;
 - automatically checks USDT BEP20 transfers on BNB Smart Chain and USDT TRC20 transfers on TRON;
 - purchases from Canboso after payment is confirmed;
-- stores only active payment requests in SQLite and removes finished/expired requests.
+- stores active payment requests and retained order history in SQLite.
 
 ## Product Sources
 
@@ -100,6 +100,7 @@ USDT TRC20:
 
 - Canboso purchases are wallet purchases. Your Canboso buyer key must have enough wallet balance for orders after customer payment is confirmed.
 - Binance ID verification needs Binance API credentials with access to Pay history. A Binance ID alone is not enough for automatic verification.
+- Finished, expired, and failed orders stay in the `orders` table for audit/history, but buyer-facing commands only check active pending requests.
 - Keep `.env` private. It is ignored by git.
 - If a bot token was shared in chat or screenshots, rotate it in BotFather before production.
 

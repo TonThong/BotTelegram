@@ -448,7 +448,13 @@ async def create_payment_order(
             await query.edit_message_text(
                 "Binance ID auto-checking is not configured yet. Please choose another payment method."
             )
-            db.delete_order(order.id)
+            db.mark_failed(
+                order.id,
+                {
+                    "success": False,
+                    "message": "Binance ID auto-checking is not configured.",
+                },
+            )
             return
         await query.edit_message_text(
             "\n".join(
@@ -544,7 +550,6 @@ async def fulfill_and_notify(context: ContextTypes.DEFAULT_TYPE, order: Order) -
         )
     except CanbosoError as exc:
         db.mark_failed(order.id, {"success": False, "message": str(exc)})
-        db.delete_order(order.id)
         await context.bot.send_message(
             chat_id=order.telegram_chat_id,
             text=(
@@ -556,14 +561,11 @@ async def fulfill_and_notify(context: ContextTypes.DEFAULT_TYPE, order: Order) -
         return
 
     fulfilled = db.mark_fulfilled(order.id, payload)
-    try:
-        await context.bot.send_message(
-            chat_id=order.telegram_chat_id,
-            text=delivery_message(fulfilled, payload),
-            parse_mode=ParseMode.HTML,
-        )
-    finally:
-        db.delete_order(order.id)
+    await context.bot.send_message(
+        chat_id=order.telegram_chat_id,
+        text=delivery_message(fulfilled, payload),
+        parse_mode=ParseMode.HTML,
+    )
 
 
 async def check_usdt_order(context: ContextTypes.DEFAULT_TYPE, order: Order) -> bool:
@@ -605,7 +607,6 @@ async def poll_usdt_payments(context: ContextTypes.DEFAULT_TYPE) -> None:
                 continue
             if order.is_expired:
                 db.mark_expired(order.id)
-                db.delete_order(order.id)
                 await context.bot.send_message(
                     chat_id=order.telegram_chat_id,
                     text="Your payment request expired before payment was confirmed.",
@@ -622,7 +623,6 @@ async def poll_binance_payments(context: ContextTypes.DEFAULT_TYPE) -> None:
             active_orders.append(order)
             continue
         db.mark_expired(order.id)
-        db.delete_order(order.id)
         await context.bot.send_message(
             chat_id=order.telegram_chat_id,
             text="Your payment request expired before payment was confirmed.",
@@ -668,7 +668,6 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         try:
             if order.is_expired:
                 db.mark_expired(order.id)
-                db.delete_order(order.id)
                 continue
             if order.payment_method == "binance_id":
                 found = await check_binance_order(context, order)
@@ -786,7 +785,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             )
             return
         if order.status != "awaiting_payment":
-            db.delete_order(order.id)
             await safe_answer_callback(
                 query, "This payment request is no longer active.", show_alert=True
             )
@@ -798,7 +796,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
         if order.is_expired:
             db.mark_expired(order.id)
-            db.delete_order(order.id)
             await safe_answer_callback(query, "This payment request expired.", show_alert=True)
             return
         try:
@@ -836,7 +833,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             )
             return
         if order.status != "awaiting_payment":
-            db.delete_order(order.id)
             await safe_answer_callback(
                 query, "This payment request is no longer active.", show_alert=True
             )
@@ -847,6 +843,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 "This payment request is not an on-chain USDT payment.",
                 show_alert=True,
             )
+            return
+        if order.is_expired:
+            db.mark_expired(order.id)
+            await safe_answer_callback(query, "This payment request expired.", show_alert=True)
             return
         try:
             found = await check_usdt_order(context, order)
