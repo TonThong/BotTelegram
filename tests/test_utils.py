@@ -47,7 +47,7 @@ def test_vnd_price_converts_to_usdt_before_markup() -> None:
         quantity_fixed=None,
     )
 
-    assert product_unit_usdt(product, markup_percent=Decimal("25")) == Decimal("12.500000")
+    assert product_unit_usdt(product, markup_percent=Decimal("25")) == Decimal("17.000000")
 
 
 def test_format_usdt_uses_six_decimals() -> None:

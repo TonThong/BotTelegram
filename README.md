@@ -110,4 +110,4 @@ USDT TRC20:
 - `/products`: browse products
 - `/check`: check pending Binance ID and USDT BEP20/TRC20 orders immediately
 - `/help`: show payment help
-- `/broadcast message`: admin only, send a plain-text message to all users who have interacted with the bot
+- `/broadcast message`: admin only, start a background plain-text broadcast to all users who have interacted with the bot

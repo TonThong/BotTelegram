@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from decimal import Decimal
 from telegram import BotCommand, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
-from telegram.error import BadRequest, Forbidden, TelegramError
+from telegram.error import BadRequest, Forbidden, RetryAfter, TelegramError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -19,7 +20,7 @@ from app.binance_pay import BinancePayError, BinancePayHistoryClient
 from app.bsc import BscError, BscUsdtScanner
 from app.canboso_client import CanbosoClient, CanbosoError, Product
 from app.config import Settings, load_settings
-from app.database import Database, Order
+from app.database import BotUser, Database, Order
 from app.local_products import LocalProductsClient
 from app.messages import delivery_message, h, payment_amount_line, product_summary
 from app.payment_amounts import amount_with_unique_fraction, base_usdt_amount, product_unit_usdt
@@ -39,6 +40,7 @@ STATE_SLOT_EMAIL = "slot_email"
 USDT_PAYMENT_METHODS = ("usdt_bep20", "usdt_trc20")
 BOT_COMMANDS = (BotCommand("start", "Open the main menu"),)
 STALE_CALLBACK_QUERY_ERROR = "Query is too old and response timeout expired or query id is invalid"
+BROADCAST_SEND_DELAY_SECONDS = 0.05
 
 
 async def safe_answer_callback(query: CallbackQuery, *args, **kwargs) -> bool:
@@ -686,6 +688,104 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
 
 
+async def deliver_broadcast_message(
+    app: Application,
+    db: Database,
+    user: BotUser,
+    text: str,
+) -> str:
+    for attempt in range(2):
+        try:
+            await app.bot.send_message(chat_id=user.telegram_chat_id, text=text)
+            return "sent"
+        except RetryAfter as exc:
+            if attempt == 0:
+                retry_after = (
+                    exc.retry_after.total_seconds()
+                    if hasattr(exc.retry_after, "total_seconds")
+                    else float(exc.retry_after)
+                )
+                logger.info(
+                    "Broadcast rate limited. Retrying user %s after %.1f seconds.",
+                    user.telegram_user_id,
+                    retry_after,
+                )
+                await asyncio.sleep(retry_after + 0.5)
+                continue
+            logger.warning("Broadcast still rate limited for user %s.", user.telegram_user_id)
+            return "failed"
+        except Forbidden:
+            db.mark_user_blocked(user.telegram_user_id)
+            return "blocked"
+        except TelegramError as exc:
+            logger.warning("Broadcast failed for user %s: %s", user.telegram_user_id, exc)
+            return "failed"
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                "Unexpected broadcast failure for user %s: %s",
+                user.telegram_user_id,
+                exc,
+            )
+            return "failed"
+    return "failed"
+
+
+async def run_broadcast(
+    app: Application,
+    *,
+    admin_chat_id: int,
+    text: str,
+    users: list[BotUser],
+) -> None:
+    db: Database = app.bot_data["db"]
+    sent = 0
+    blocked = 0
+    failed = 0
+    try:
+        for user in users:
+            result = await deliver_broadcast_message(app, db, user, text)
+            if result == "sent":
+                sent += 1
+            elif result == "blocked":
+                blocked += 1
+            else:
+                failed += 1
+            await asyncio.sleep(BROADCAST_SEND_DELAY_SECONDS)
+
+        try:
+            await app.bot.send_message(
+                chat_id=admin_chat_id,
+                text=f"Broadcast finished.\nSent: {sent}\nBlocked: {blocked}\nFailed: {failed}",
+            )
+        except TelegramError as exc:
+            logger.warning(
+                "Could not send broadcast summary to admin %s: %s",
+                admin_chat_id,
+                exc,
+            )
+    finally:
+        active_task = app.bot_data.get("broadcast_task")
+        if active_task is asyncio.current_task():
+            app.bot_data.pop("broadcast_task", None)
+
+
+def start_background_broadcast(
+    app: Application,
+    *,
+    admin_chat_id: int,
+    text: str,
+    users: list[BotUser],
+) -> bool:
+    active_task = app.bot_data.get("broadcast_task")
+    if active_task is not None and not active_task.done():
+        return False
+    app.bot_data["broadcast_task"] = app.create_task(
+        run_broadcast(app, admin_chat_id=admin_chat_id, text=text, users=users),
+        name="broadcast",
+    )
+    return True
+
+
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     track_user(update, context)
     settings: Settings = context.application.bot_data["settings"]
@@ -700,22 +800,25 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     db: Database = context.application.bot_data["db"]
     users = db.list_broadcast_users()
-    sent = 0
-    blocked = 0
-    failed = 0
-    for user in users:
-        try:
-            await context.bot.send_message(chat_id=user.telegram_chat_id, text=text)
-            sent += 1
-        except Forbidden:
-            db.mark_user_blocked(user.telegram_user_id)
-            blocked += 1
-        except TelegramError as exc:
-            logger.warning("Broadcast failed for user %s: %s", user.telegram_user_id, exc)
-            failed += 1
+    if not users:
+        await update.message.reply_text("No users are available for broadcast.")
+        return
+
+    started = start_background_broadcast(
+        context.application,
+        admin_chat_id=update.effective_chat.id,
+        text=text,
+        users=users,
+    )
+    if not started:
+        await update.message.reply_text(
+            "A broadcast is already running. Please wait for it to finish."
+        )
+        return
 
     await update.message.reply_text(
-        f"Broadcast finished.\nSent: {sent}\nBlocked: {blocked}\nFailed: {failed}"
+        f"Broadcast started in the background.\nRecipients: {len(users)}\n"
+        "The bot can keep handling customer orders while this runs."
     )
 
 

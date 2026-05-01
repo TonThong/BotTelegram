@@ -13,7 +13,7 @@ class CanbosoError(RuntimeError):
     pass
 
 
-VND_PER_USD = Decimal("34000")
+VND_PER_USD = Decimal("25000")
 VND_CURRENCIES = {"VND", "VNĐ", "DONG", "Đ", "₫"}
 
 
